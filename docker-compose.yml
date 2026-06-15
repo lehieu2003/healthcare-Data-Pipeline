@@ -1,0 +1,51 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: healthcare-postgres
+    environment:
+      POSTGRES_DB: healthcare
+      POSTGRES_USER: pipeline
+      POSTGRES_PASSWORD: pipeline
+    ports:
+      - "55432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pipeline -d healthcare"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio
+    container_name: healthcare-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  spark:
+    image: bitnami/spark:3.5
+    container_name: healthcare-spark
+    environment:
+      PYTHONPATH: /app
+    working_dir: /app
+    volumes:
+      - ./:/app
+    profiles:
+      - processing
+
+volumes:
+  postgres_data:
+  minio_data:
