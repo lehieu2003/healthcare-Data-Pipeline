@@ -51,15 +51,17 @@ def create_spark(app_name: str = "bronze-to-silver") -> SparkSession:
     os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
     os.environ.setdefault("PYSPARK_DRIVER_PYTHON", sys.executable)
 
-    return (
+    spark = (
         SparkSession.builder.appName(app_name)
         .master("local[2]")
         .config("spark.sql.session.timeZone", "UTC")
-        .config("spark.sql.shuffle.partitions", "8")
+        .config("spark.sql.shuffle.partitions", "64")
         .config("spark.pyspark.python", sys.executable)
         .config("spark.pyspark.driver.python", sys.executable)
         .getOrCreate()
     )
+    spark.sparkContext.setLogLevel("WARN")
+    return spark
 
 
 def read_bronze_csv(spark: SparkSession, path: str) -> DataFrame:
