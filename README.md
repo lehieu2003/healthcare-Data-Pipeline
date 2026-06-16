@@ -9,11 +9,12 @@ CMS Data API
 -> Python ingestion
 -> MinIO Bronze CSV + manifest
 -> Spark Silver Parquet
--> PostgreSQL Gold star schema
+-> Spark Gold aggregate marts
+-> PostgreSQL Gold marts
 -> Superset dashboard
 ```
 
-Kafka and Grafana are intentionally deferred. The source data is annual batch data, so version 1 prioritizes ingestion correctness, lineage, row-count reconciliation, and a clean analytical model.
+Kafka and Grafana are intentionally deferred. The source data is annual batch data, so version 1 prioritizes ingestion correctness, lineage, row-count reconciliation, disk-safe local processing, and a clean analytical model.
 
 ## Current Implementation
 
@@ -22,14 +23,16 @@ Implemented:
 - Local Docker Compose services for PostgreSQL and MinIO.
 - CMS ingestion package with pagination, retries, CSV writing, checksum, and manifest generation.
 - PostgreSQL metadata tables for ingestion and data quality results.
-- Unit tests for manifest and ingestion pagination behavior.
+- Spark Bronze to Silver transformation for CMS Part D prescriber detail data.
+- Spark Silver to Gold aggregate mart exports.
+- PostgreSQL Gold mart tables and CSV loader.
+- Unit tests for manifest, ingestion pagination, Silver transforms, and Gold mart transforms.
 
 Next:
 
-- Wire ingestion into MinIO and PostgreSQL with a real smoke run.
-- Add Bronze to Silver Spark job.
-- Add Gold dimensional model tables.
-- Add Airflow DAGs after the local ingestion path is stable.
+- Add Superset dashboards on top of the Gold marts.
+- Add more years after validating local disk capacity.
+- Add Airflow DAGs after the manual local path is stable.
 
 ## Local Setup
 
@@ -52,6 +55,10 @@ Run tests:
 pytest -q
 ```
 
+## Run Pipeline
+
+### 1. Bronze Ingestion
+
 Run a safe ingestion smoke test without MinIO upload:
 
 ```bash
@@ -66,6 +73,69 @@ python -m ingestion.ingest_cms_part_d --years 2022
 
 The full run can download a large dataset. Use `--max-pages` during development.
 
+### 2. Silver Parquet
+
+Run Bronze to Silver for the full 2022 dataset:
+
+```bash
+docker compose exec spark /opt/spark/bin/spark-submit --driver-memory 4g /app/spark/jobs/bronze_to_silver.py --year 2022 --input-path /app/data/raw/part_d_2022.csv --output-path /app/data/silver/part_d_prescribers --skip-count
+```
+
+If the local raw CSV was deleted after upload to MinIO, restore it from MinIO or rerun ingestion before this step. Silver output is the detailed Parquet layer and should remain the source of truth for row-level analysis.
+
+Inspect Silver output:
+
+```bash
+docker compose exec spark /opt/spark/bin/spark-submit --driver-memory 2g /app/spark/jobs/inspect_parquet.py --input-path /app/data/silver/part_d_prescribers --limit 5
+```
+
+### 3. Gold Mart Export
+
+Create PostgreSQL Gold mart tables:
+
+```bash
+docker compose exec postgres psql -U pipeline -d healthcare -f /docker-entrypoint-initdb.d/003_create_gold_marts.sql
+```
+
+Export aggregate Gold marts from Silver:
+
+```bash
+docker compose exec spark /opt/spark/bin/spark-submit --driver-memory 4g /app/spark/jobs/silver_to_gold_marts.py --input-path /app/data/silver/part_d_prescribers --output-path /app/data/gold_mart_export --skip-count
+```
+
+Load Gold mart exports into PostgreSQL:
+
+```bash
+.venv\Scripts\python.exe gold_loader.py --export-dir data\gold_mart_export --load-set marts --truncate
+```
+
+Verify loaded row counts:
+
+```bash
+docker compose exec postgres psql -U pipeline -d healthcare -c "SELECT 'gold_state_year_spending' AS table_name, count(*) FROM gold_state_year_spending UNION ALL SELECT 'gold_drug_year_spending', count(*) FROM gold_drug_year_spending UNION ALL SELECT 'gold_specialty_state_spending', count(*) FROM gold_specialty_state_spending UNION ALL SELECT 'gold_prescriber_summary', count(*) FROM gold_prescriber_summary UNION ALL SELECT 'gold_anomaly_prescribers', count(*) FROM gold_anomaly_prescribers;"
+```
+
+Expected 2022 row counts from the current local run:
+
+| Table | Rows |
+| --- | ---: |
+| `gold_state_year_spending` | 61 |
+| `gold_drug_year_spending` | 3,136 |
+| `gold_specialty_state_spending` | 4,813 |
+| `gold_prescriber_summary` | 1,057,566 |
+| `gold_anomaly_prescribers` | 50,226 |
+
+## Local Storage Notes
+
+Do not load the full detailed prescription fact table into local PostgreSQL unless the machine has enough free disk for both staged CSV files and PostgreSQL indexes. The recommended local path is:
+
+```text
+Silver Parquet keeps row-level detail.
+PostgreSQL stores aggregate Gold marts for BI.
+```
+
+See `doc/run-process-notes.md` for the low-disk issue and the design change made during the first full run.
+
 ## Services
 
 | Service | URL | Credentials |
@@ -73,3 +143,4 @@ The full run can download a large dataset. Use `--max-pages` during development.
 | MinIO API | `http://localhost:9000` | `minioadmin` / `minioadmin` |
 | MinIO Console | `http://localhost:9001` | `minioadmin` / `minioadmin` |
 | PostgreSQL | `localhost:55432` | `pipeline` / `pipeline` |
+| Spark UI | `http://localhost:4040` | available only while a Spark application is running |
